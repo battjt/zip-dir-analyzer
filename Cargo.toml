@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zip = "*"
-regex = "*"
-walkdir = "*"
-clap = { version = "*", features = ["derive"] }
-anyhow = "*"
-executors="*"
-either="*"
+zip = "2.2"
+regex = "1.11.1"
+clap = { version = "4.5.26", features = ["derive"] }
+anyhow = "1.0.95"
+executors="0.10.0"
