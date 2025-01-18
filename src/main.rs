@@ -47,10 +47,9 @@ impl Logga<File> {
             out,
             rx,
         }
-        .run_path(root_dir)
+        .run_path(Path::new(root_dir.as_str()))
     }
 }
-trait Reek: Read + Seek {}
 impl<W: Write> Logga<W> {
     /*
     1. dir
@@ -59,20 +58,18 @@ impl<W: Write> Logga<W> {
          zip within zip
     3. file
     */
-    fn run_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let path = path.as_ref();
+    fn run_path(&self, path: &Path) -> Result<()> {
         let path_str = path.to_str().unwrap();
         if path.is_dir() {
-            self.run_dir(path)
+            self.run_dir(&path)
         } else if path_str.ends_with(".zip") {
-            let file = fs::File::open(path)?;
-            self.run_zip(path_str, Box::new(&file))
+            self.run_zip(path_str, fs::File::open(path)?)
         } else {
             self.grep(path_str, &File::open(path)?)
         }
     }
 
-    fn run_zip(&self, path: &str, zip_file: Box<dyn Reek>) -> Result<(), anyhow::Error> {
+    fn run_zip<T: Read + Seek>(&self, path: &str, zip_file: T) -> Result<(), anyhow::Error> {
         let mut archive = zip::ZipArchive::new(zip_file)?;
         for i in 0..archive.len() {
             let (file_name, is_dir) = {
@@ -86,7 +83,7 @@ impl<W: Write> Logga<W> {
                 let zip_seek = archive.by_index_seek(i)?;
                 if file_name.ends_with(".zip") {
                     self.report(&file_name, "zip in zip not supported")?;
-                    self.run_zip(&file_name, Box::new(&zip_seek))?;
+                    self.run_zip(&file_name, Box::new(zip_seek))?;
                 } else {
                     self.grep(&file_name, zip_seek)?;
                 }
@@ -97,7 +94,8 @@ impl<W: Write> Logga<W> {
 
     fn run_dir(&self, path: &Path) -> Result<(), anyhow::Error> {
         for d in std::fs::read_dir(path)? {
-            self.run_path(&d?.path())?;
+            let path_buf = d?.path();
+            self.run_path(path_buf.as_path())?;
         }
         Ok(())
     }
