@@ -49,6 +49,14 @@ pub struct Args {
     /// parallel - defaults to number of virtual CPUs.
     #[arg(long)]
     parallel: Option<usize>,
+
+    /// do not report file name in results
+    #[arg(long)]
+    no_file: bool,
+
+    /// only report the file name once in the results
+    #[arg(long)]
+    file_only: bool,
 }
 #[derive(Clone)]
 struct ZipDirAnalyzer {
@@ -103,7 +111,7 @@ impl ZipDirAnalyzer {
     }
 
     /// evaluate how to process the path
-    fn walk_path(&self, path: &Path) -> Result<(), anyhow::Error> {
+    fn walk_path(&self, path: &Path) -> Result<()> {
         let path_str = path.to_str().unwrap();
         if path.is_dir() {
             self.walk_dir(&path)
@@ -119,7 +127,7 @@ impl ZipDirAnalyzer {
     }
 
     /// path is a directory.  Process each entry in a separate thread.
-    fn walk_dir(&self, path: &Path) -> Result<(), anyhow::Error> {
+    fn walk_dir(&self, path: &Path) -> Result<()> {
         for entry in std::fs::read_dir(path)? {
             self.ops_scheduled
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -131,7 +139,7 @@ impl ZipDirAnalyzer {
                 let result = self_clone.walk_path(path_buf.as_path());
                 if result.is_err() && !quiet {
                     eprintln!(
-                        "WARN: {} skipped due to 2 {}",
+                        "WARN: {} skipped due to {}",
                         path_buf.to_str().unwrap(),
                         result.unwrap_err()
                     );
@@ -145,7 +153,7 @@ impl ZipDirAnalyzer {
     }
 
     /// path is a zip, so unzip and process each entry
-    fn walk_zip(&self, path: &str, zip_file: &mut dyn Read) -> Result<(), anyhow::Error> {
+    fn walk_zip(&self, path: &str, zip_file: &mut dyn Read) -> Result<()> {
         let mut archive = zip::ZipArchive::new(AccReader::new(zip_file))?;
         for i in 0..archive.len() {
             let mut zip_file = archive.by_index(i)?;
@@ -164,24 +172,39 @@ impl ZipDirAnalyzer {
     }
 
     /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<(), anyhow::Error> {
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
         if self.file_regex.is_match(path) {
             let status = format!("processing: {}", path);
             self.progress.set_message(status);
             let lines = io::BufReader::new(data).lines();
-            let mut notified = false;
+            let mut consecutive_error_count = 0;
+            let max_errors = 10;
             for line in lines {
                 if line.is_err() {
-                    // report first occurence per file, but continue processing file
-                    if !self.args.quiet && !notified {
-                        eprintln!("WARN: {path} skipped lines due to {}", line.unwrap_err());
-                        notified = true;
+                    let err = line.unwrap_err();
+                    if consecutive_error_count > max_errors {
+                        if !self.args.quiet {
+                            eprintln!("WARN: {path} skipping file ({max_errors} consecutive errors) {err}");
+                        }
+                        // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
+                        break;
                     }
+                    // report errors, but continue processing file
+                    if !self.args.quiet {
+                        eprintln!("WARN: {path} skipped line due to {err}");
+                    }
+                    consecutive_error_count = consecutive_error_count + 1;
                 } else {
                     let line = line?;
                     if self.regex.is_match(&line) {
-                        self.report(path, &line)?;
+                        if self.args.file_only {
+                            stdout().write_fmt(format_args!("{path}\n"))?;
+                            break;
+                        } else {
+                            self.report(path, &line)?;
+                        }
                     }
+                    consecutive_error_count = 0;
                 }
             }
         } else {
@@ -193,7 +216,12 @@ impl ZipDirAnalyzer {
     }
 
     /// all reporting
-    fn report(&self, file: &str, line: &str) -> Result<(), anyhow::Error> {
-        Ok(stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?)
+    fn report(&self, file: &str, line: &str) -> Result<()> {
+        if self.args.no_file {
+            stdout().write_fmt(format_args!("{line}\n"))?;
+        } else {
+            stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?;
+        }
+        Ok(())
     }
 }
