@@ -46,9 +46,9 @@ pub struct Args {
     #[arg(short = 'd', default_value = ": ")]
     delimiter: String,
 
-    /// parallel - defaults to number of virtual CPUs.
-    #[arg(long)]
-    parallel: Option<usize>,
+    /// how many directories to process in parallel
+    #[arg(long, default_value_t=num_cpus::get())]
+    parallel: usize,
 
     /// do not report file name in results
     #[arg(long)]
@@ -57,7 +57,12 @@ pub struct Args {
     /// only report the file name once in the results
     #[arg(long)]
     file_only: bool,
+
+    /// max consecutive errors to allow before skipping file.
+    #[arg(long, default_value_t = 3)]
+    max_errors: usize,
 }
+
 #[derive(Clone)]
 struct ZipDirAnalyzer {
     pool: Arc<Mutex<ThreadPoolExecutor>>,
@@ -75,7 +80,7 @@ impl ZipDirAnalyzer {
         let binding = args.directory.clone();
         let zip_dir_analyzer = ZipDirAnalyzer {
             pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(
-                args.parallel.unwrap_or(num_cpus::get()),
+                args.parallel,
             ))),
             ops_scheduled: Default::default(),
             ops_complete: Default::default(),
@@ -122,6 +127,9 @@ impl ZipDirAnalyzer {
             self.grep_file(path_str, &File::open(path)?)
         } else {
             // skipping links and devices and such
+            if self.args.verbose {
+                eprintln!("INFO: skipping non-file {}", path_str);
+            }
             Ok(())
         }
     }
@@ -178,13 +186,15 @@ impl ZipDirAnalyzer {
             self.progress.set_message(status);
             let lines = io::BufReader::new(data).lines();
             let mut consecutive_error_count = 0;
-            let max_errors = 10;
             for line in lines {
                 if line.is_err() {
                     let err = line.unwrap_err();
-                    if consecutive_error_count > max_errors {
+                    if consecutive_error_count > self.args.max_errors {
                         if !self.args.quiet {
-                            eprintln!("WARN: {path} skipping file ({max_errors} consecutive errors) {err}");
+                            eprintln!(
+                                "WARN: {path} skipping file ({} consecutive errors) {err}",
+                                self.args.max_errors
+                            );
                         }
                         // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
                         break;

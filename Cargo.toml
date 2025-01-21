@@ -1,12 +1,12 @@
 [package]
 name = "zip-dir-analyzer"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
 zip = "2.2"
 regex = "1.11.1"
-clap = { version = "4.5.26", features = ["derive"] }
+clap = { version = "4.5.27", features = ["derive"] }
 anyhow = "1.0.95"
 executors="0.10.0"
 acc_reader = "2.0"
