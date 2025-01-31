@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'zip-dir-analyzer'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=zip-dir-analyzer",
+                    "--package=zip-dir-analyzer"
+                ],
+                "filter": {
+                    "name": "zip-dir-analyzer",
+                    "kind": "bin"
+                }
+            },
+            "args": ["test",".*","car"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'logga'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=logga",
+                    "--package=logga"
+                ],
+                "filter": {
+                    "name": "logga",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

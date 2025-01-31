@@ -9,6 +9,5 @@ regex = "1.11.1"
 clap = { version = "4.5.27", features = ["derive"] }
 anyhow = "1.0.95"
 executors="0.10.0"
-acc_reader = "2.0"
-indicatif="0.17.9"
+indicatif="0.17.11"
 num_cpus="1.16.0"

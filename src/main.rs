@@ -1,4 +1,3 @@
-use acc_reader::AccReader;
 use anyhow::Result;
 use clap::Parser;
 use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
@@ -161,16 +160,16 @@ impl ZipDirAnalyzer {
     }
 
     /// path is a zip, so unzip and process each entry
-    fn walk_zip(&self, path: &str, zip_file: &mut dyn Read) -> Result<()> {
-        let mut archive = zip::ZipArchive::new(AccReader::new(zip_file))?;
+    fn walk_zip(&self, path: &str, zip_file: &mut File) -> Result<()> {
+        let mut archive = zip::ZipArchive::new(zip_file)?;
         for i in 0..archive.len() {
-            let mut zip_file = archive.by_index(i)?;
+            let  zip_file = archive.by_index(i)?;
             if zip_file.is_dir() {
                 // just a directory placeholder.
             } else {
                 let file_name = path.to_string() + "!" + &zip_file.name().to_string();
                 if file_name.ends_with(".zip") {
-                    self.walk_zip(&file_name, &mut zip_file)?;
+                    eprintln!("No support for a zip of a zip yet {file_name}");
                 } else {
                     self.grep_file(&file_name, zip_file)?;
                 }
