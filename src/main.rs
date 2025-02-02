@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use clap::Parser;
 use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,15 +11,17 @@ use std::{
     thread,
     time::Duration,
 };
+use zip::read::read_zipfile_from_stream;
 
 fn main() -> Result<()> {
     ZipDirAnalyzer::run(Args::parse())
 }
 
-/// Search directory for files matching the file_pat that include the line_pat. Zip files are also searched.
+/// Search directory for files matching the file_pat that include the line_pat. The contents of zip files are also searched.
 ///
-/// The progress is reported as files processed from the filesystem, not files within the zips. A X zips of Y files will report X operations, not X*Y operations.
+/// The progress is reported as files processed from the filesystem, not files within the zips. X zips each of Y files will report X operations, not X*Y operations.
 #[derive(Parser, Debug, Default, Clone)]
+#[command(version, about)]
 pub struct Args {
     /// directory to search
     #[arg()]
@@ -78,9 +80,7 @@ impl ZipDirAnalyzer {
     pub fn run(args: Args) -> Result<()> {
         let binding = args.directory.clone();
         let zip_dir_analyzer = ZipDirAnalyzer {
-            pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(
-                args.parallel,
-            ))),
+            pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
             ops_scheduled: Default::default(),
             ops_complete: Default::default(),
             regex: regex::Regex::new(&args.line_pat)?,
@@ -160,22 +160,22 @@ impl ZipDirAnalyzer {
     }
 
     /// path is a zip, so unzip and process each entry
-    fn walk_zip(&self, path: &str, zip_file: &mut File) -> Result<()> {
-        let mut archive = zip::ZipArchive::new(zip_file)?;
-        for i in 0..archive.len() {
-            let  zip_file = archive.by_index(i)?;
-            if zip_file.is_dir() {
-                // just a directory placeholder.
-            } else {
-                let file_name = path.to_string() + "!" + &zip_file.name().to_string();
-                if file_name.ends_with(".zip") {
-                    eprintln!("No support for a zip of a zip yet {file_name}");
-                } else {
-                    self.grep_file(&file_name, zip_file)?;
+    fn walk_zip<R: Read>(&self, path: &str, read: &mut R) -> Result<()> {
+        loop {
+            match read_zipfile_from_stream(read)? {
+                Some(mut file) => {
+                    if !file.is_dir() {
+                        let path = path.to_string() + "!" + file.name();
+                        if file.name().ends_with(".zip") {
+                            self.walk_zip(&path, &mut file)?;
+                        } else {
+                            self.grep_file(&path, &mut file)?;
+                        }
+                    }
                 }
+                None => return Ok(()),
             }
         }
-        Ok(())
     }
 
     /// base file searching routine
