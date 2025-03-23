@@ -4,10 +4,12 @@ version = "1.0.1"
 edition = "2021"
 
 [dependencies]
-zip = "2.2"
+zip = "2.2.3"
 regex = "1.11.1"
-clap = { version = "4.5.27", features = ["derive"] }
-anyhow = "1.0.95"
+clap = { version = "4.5.32", features = ["derive"] }
+anyhow = "1.0.97"
 executors="0.10.0"
 indicatif="0.17.11"
 num_cpus="1.16.0"
+jaq="2.1.1"
+either="1.15.0"

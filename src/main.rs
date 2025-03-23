@@ -14,7 +14,71 @@ use std::{
 use zip::read::read_zipfile_from_stream;
 
 fn main() -> Result<()> {
-    ZipDirAnalyzer::run(Args::parse())
+    let args = Args::parse();
+    if args.jq {
+        ZipDirAnalyzer::<JqProcessor>::run(args, JqProcessor {})
+    } else {
+        let processor = RegexProcessor {
+            regex: Regex::new(&args.pattern)?,
+        };
+        ZipDirAnalyzer::<RegexProcessor>::run(args, processor)
+    }
+}
+
+trait TextProcessor: Send + Clone {
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()>;
+}
+#[derive(Clone)]
+struct JqProcessor {}
+#[derive(Clone)]
+struct RegexProcessor {
+    regex: Regex,
+}
+impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
+        todo!()
+    }
+}
+impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
+    /// base file searching routine
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
+        let status = format!("processing: {path}");
+        self.progress.set_message(status);
+
+        let mut consecutive_error_count = 0;
+        for r in io::BufReader::new(data).lines() {
+            match r {
+                Err(err) => {
+                    if consecutive_error_count > self.args.max_errors {
+                        if !self.args.quiet {
+                            eprintln!(
+                                "WARN: {path} skipping file ({} consecutive errors) {err}",
+                                self.args.max_errors
+                            );
+                        }
+                        // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
+                        break;
+                    }
+                    if !self.args.quiet {
+                        eprintln!("WARN: {path} skipped line due to {err}");
+                    }
+                    consecutive_error_count = consecutive_error_count + 1;
+                }
+                Result::Ok(line) => {
+                    if self.processor.regex.is_match(&line) {
+                        if self.args.file_only {
+                            stdout().write_fmt(format_args!("{path}\n"))?;
+                            break;
+                        } else {
+                            self.report(path, &line)?;
+                        }
+                    }
+                    consecutive_error_count = 0;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Search directory for files matching the file_pat that include the line_pat. The contents of zip files are also searched.
@@ -33,7 +97,7 @@ pub struct Args {
 
     /// report lines that match this regex
     #[arg()]
-    line_pat: String,
+    pattern: String,
 
     /// report skipped files
     #[arg(long, short = 'v')]
@@ -62,28 +126,35 @@ pub struct Args {
     /// max consecutive errors to allow before skipping file.
     #[arg(long, default_value_t = 3)]
     max_errors: usize,
+
+    #[arg(long, default_value_t = false)]
+    jq: bool,
 }
 
 #[derive(Clone)]
-struct ZipDirAnalyzer {
+struct ZipDirAnalyzer<TP: Send + Clone> {
     pool: Arc<Mutex<ThreadPoolExecutor>>,
     ops_scheduled: Arc<AtomicU64>,
     ops_complete: Arc<AtomicU64>,
-    regex: Regex,
+    processor: TP,
     file_regex: Regex,
     args: Args,
     progress: ProgressBar,
 }
 
-impl ZipDirAnalyzer {
+impl<TP> ZipDirAnalyzer<TP>
+where
+    ZipDirAnalyzer<TP>: TextProcessor,
+    TP: Send + Clone + 'static,
+{
     /// Main entry point.
-    pub fn run(args: Args) -> Result<()> {
+    pub fn run(args: Args, processor: TP) -> Result<()> {
         let binding = args.directory.clone();
         let zip_dir_analyzer = ZipDirAnalyzer {
             pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
             ops_scheduled: Default::default(),
             ops_complete: Default::default(),
-            regex: regex::Regex::new(&args.line_pat)?,
+            processor,
             file_regex: regex::Regex::new(&args.file_pat)?,
             args,
             progress: ProgressBar::new(100),
@@ -167,9 +238,10 @@ impl ZipDirAnalyzer {
                     if !file.is_dir() {
                         let path = path.to_string() + "!" + file.name();
                         if file.name().ends_with(".zip") {
-                            self.walk_zip(&path, &mut file)?;
+                            eprintln!("Zip in zip not supported.");
+                            // self.walk_zip(&path, &mut file)?;
                         } else {
-                            self.grep_file(&path, &mut file)?;
+                            self.search_file(&path, &mut file)?;
                         }
                     }
                 }
@@ -178,48 +250,11 @@ impl ZipDirAnalyzer {
         }
     }
 
-    /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
+    fn search_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
         if self.file_regex.is_match(path) {
-            let status = format!("processing: {}", path);
-            self.progress.set_message(status);
-            let lines = io::BufReader::new(data).lines();
-            let mut consecutive_error_count = 0;
-            for line in lines {
-                if line.is_err() {
-                    let err = line.unwrap_err();
-                    if consecutive_error_count > self.args.max_errors {
-                        if !self.args.quiet {
-                            eprintln!(
-                                "WARN: {path} skipping file ({} consecutive errors) {err}",
-                                self.args.max_errors
-                            );
-                        }
-                        // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
-                        break;
-                    }
-                    // report errors, but continue processing file
-                    if !self.args.quiet {
-                        eprintln!("WARN: {path} skipped line due to {err}");
-                    }
-                    consecutive_error_count = consecutive_error_count + 1;
-                } else {
-                    let line = line?;
-                    if self.regex.is_match(&line) {
-                        if self.args.file_only {
-                            stdout().write_fmt(format_args!("{path}\n"))?;
-                            break;
-                        } else {
-                            self.report(path, &line)?;
-                        }
-                    }
-                    consecutive_error_count = 0;
-                }
-            }
-        } else {
-            if self.args.verbose {
-                eprintln!("INFO: skipping {}", path);
-            }
+            self.grep_file(path, data);
+        } else if self.args.verbose {
+            eprintln!("INFO: skipping {}", path);
         }
         Ok(())
     }
