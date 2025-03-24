@@ -2,7 +2,9 @@ use anyhow::{Ok, Result};
 use clap::Parser;
 use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
 use indicatif::{ProgressBar, ProgressStyle};
+use jaq_interpret::{Ctx, Filter, FilterT, ParseCtx, RcIter, Val};
 use regex::Regex;
+use serde_json::Value;
 use std::{
     fs::{self, File},
     io::{self, stdout, BufRead, Read, Write},
@@ -16,12 +18,26 @@ use zip::read::read_zipfile_from_stream;
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.jq {
-        ZipDirAnalyzer::<JqProcessor>::run(args, JqProcessor {})
+        let mut ctx = ParseCtx::new(Vec::new());
+        ctx.insert_natives(jaq_core::core());
+        ctx.insert_defs(jaq_std::std());
+
+        let (f, errs) = jaq_parse::parse(&args.pattern, jaq_parse::main());
+        if !errs.is_empty() {
+            let error_message = errs
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(anyhow::anyhow!(error_message));
+        }
+
+        let filter = ctx.compile(f.unwrap());
+
+        ZipDirAnalyzer::run(args, JqProcessor { filter })
     } else {
-        let processor = RegexProcessor {
-            regex: Regex::new(&args.pattern)?,
-        };
-        ZipDirAnalyzer::<RegexProcessor>::run(args, processor)
+        let regex = Regex::new(&args.pattern)?;
+        ZipDirAnalyzer::run(args, RegexProcessor { regex })
     }
 }
 
@@ -29,14 +45,41 @@ trait TextProcessor: Send + Clone {
     fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()>;
 }
 #[derive(Clone)]
-struct JqProcessor {}
+struct JqProcessor {
+    filter: Filter,
+}
 #[derive(Clone)]
 struct RegexProcessor {
     regex: Regex,
 }
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
     fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
-        todo!()
+        let value: Result<Value, _> = serde_json::from_reader(data);
+        match value {
+            Result::Ok(value) => {
+                let inputs = RcIter::new(core::iter::empty());
+                let out = self
+                    .processor
+                    .filter
+                    .run((Ctx::new([], &inputs), Val::from(value)));
+                for o in out {
+                    match o {
+                        Result::Ok(json_val) => {
+                            self.report(path, json_val.as_str().unwrap())?;
+                        }
+                        Err(err) => {
+                            println!("Error: {}", err);
+                        }
+                    };
+                }
+            }
+            Err(je) => {
+                if !self.args.quiet {
+                    println!("JSON Error: {}", je)
+                }
+            }
+        };
+        Ok(())
     }
 }
 impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
@@ -62,15 +105,13 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                     if !self.args.quiet {
                         eprintln!("WARN: {path} skipped line due to {err}");
                     }
-                    consecutive_error_count = consecutive_error_count + 1;
+                    consecutive_error_count += 1;
                 }
                 Result::Ok(line) => {
                     if self.processor.regex.is_match(&line) {
+                        self.report(path, &line)?;
                         if self.args.file_only {
-                            stdout().write_fmt(format_args!("{path}\n"))?;
                             break;
-                        } else {
-                            self.report(path, &line)?;
                         }
                     }
                     consecutive_error_count = 0;
@@ -189,7 +230,7 @@ where
     fn walk_path(&self, path: &Path) -> Result<()> {
         let path_str = path.to_str().unwrap();
         if path.is_dir() {
-            self.walk_dir(&path)
+            self.walk_dir(path)
         } else if path_str.ends_with(".zip") {
             let mut file = fs::File::open(path)?;
             self.walk_zip(path_str, &mut file)
@@ -252,7 +293,7 @@ where
 
     fn search_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
         if self.file_regex.is_match(path) {
-            self.grep_file(path, data);
+            self.grep_file(path, data)?;
         } else if self.args.verbose {
             eprintln!("INFO: skipping {}", path);
         }
@@ -263,6 +304,8 @@ where
     fn report(&self, file: &str, line: &str) -> Result<()> {
         if self.args.no_file {
             stdout().write_fmt(format_args!("{line}\n"))?;
+        } else if self.args.file_only {
+            stdout().write_fmt(format_args!("{}\n", file))?;
         } else {
             stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?;
         }
