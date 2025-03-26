@@ -42,7 +42,7 @@ fn main() -> Result<()> {
 }
 
 trait TextProcessor: Send + Clone {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()>;
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
 }
 #[derive(Clone)]
 struct JqProcessor {
@@ -53,7 +53,7 @@ struct RegexProcessor {
     regex: Regex,
 }
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {
@@ -65,7 +65,9 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
                 for o in out {
                     match o {
                         Result::Ok(json_val) => {
-                            self.report(path, json_val.as_str().unwrap())?;
+                            if self.report(path, json_val.as_str().unwrap())? {
+                                return Ok(true);
+                            }
                         }
                         Err(err) => {
                             println!("Error: {}", err);
@@ -79,12 +81,12 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
                 }
             }
         };
-        Ok(())
+        Ok(false)
     }
 }
 impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
     /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
+    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let status = format!("processing: {path}");
         self.progress.set_message(status);
 
@@ -108,17 +110,14 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                     consecutive_error_count += 1;
                 }
                 Result::Ok(line) => {
-                    if self.processor.regex.is_match(&line) {
-                        self.report(path, &line)?;
-                        if self.args.file_only {
-                            break;
-                        }
+                    if self.processor.regex.is_match(&line) && self.report(path, &line)? {
+                        return Ok(true);
                     }
                     consecutive_error_count = 0;
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -128,46 +127,55 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
 #[derive(Parser, Debug, Default, Clone)]
 #[command(version, about)]
 pub struct Args {
-    /// directory to search
+    /// Directory to search. Use '-' to indicate that the list of directories will be on stdin.
     #[arg()]
     directory: String,
 
-    /// only analyze files with names matching this regex
+    /// Only analyze files with names matching this regex.
     #[arg()]
     file_pat: String,
 
-    /// report lines that match this regex
+    /// Report lines that match this regex.
     #[arg()]
     pattern: String,
 
-    /// report skipped files
+    /// Report skipped files.
     #[arg(long, short = 'v')]
     verbose: bool,
 
-    /// do not report non-text file errors
+    /// Do not report non-text file errors.
     #[arg(long, short = 'q')]
     quiet: bool,
 
-    /// delimiter between file name and matching line
-    #[arg(short = 'd', default_value = ": ")]
+    /// Delimiter between file name and matching line.
+    #[arg(long, short = 'd', default_value = ": ")]
     delimiter: String,
 
-    /// how many directories to process in parallel
+    /// Delimiter between zip file name and the file name.
+    #[arg(long, short = 'z', default_value = "!")]
+    zip_delimiter: String,
+
+    /// How many directories to process in parallel.
     #[arg(long, default_value_t=num_cpus::get())]
     parallel: usize,
 
-    /// do not report file name in results
+    /// Do not report file name in results.
     #[arg(long)]
     no_file: bool,
 
-    /// only report the file name once in the results
+    /// Only report the file name once in the results.
     #[arg(long)]
     file_only: bool,
 
-    /// max consecutive errors to allow before skipping file.
+    /// Only report the zip name once in the results.
+    #[arg(long)]
+    zip_only: bool,
+
+    /// Max consecutive errors to allow before skipping file.
     #[arg(long, default_value_t = 3)]
     max_errors: usize,
 
+    /// Use jaq (similar to jq) to query JSON files instead of regex.
     #[arg(long, default_value_t = false)]
     jq: bool,
 }
@@ -207,8 +215,13 @@ where
                 "{bar} {pos}/{len} {wide_msg}",
             )?);
 
-        zip_dir_analyzer.walk_path(Path::new(binding.as_str()))?;
-
+        if binding == "-" {
+            for line in io::stdin().lines() {
+                zip_dir_analyzer.walk_path(Path::new(line?.as_str()))?
+            }
+        } else {
+            zip_dir_analyzer.walk_path(Path::new(binding.as_str()))?;
+        }
         let mut scheduled = 1;
         let mut complete = 0;
         // wait for all processing to complete
@@ -235,7 +248,8 @@ where
             let mut file = fs::File::open(path)?;
             self.walk_zip(path_str, &mut file)
         } else if path.is_file() {
-            self.grep_file(path_str, &File::open(path)?)
+            self.grep_file(path_str, &File::open(path)?)?;
+            Ok(())
         } else {
             // skipping links and devices and such
             if self.args.verbose {
@@ -277,9 +291,11 @@ where
             match read_zipfile_from_stream(read)? {
                 Some(mut file) => {
                     if !file.is_dir() {
-                        let path = path.to_string() + "!" + file.name();
+                        let path = path.to_string() + &self.args.zip_delimiter + file.name();
                         if file.name().ends_with(".zip") {
-                            eprintln!("Zip in zip not supported.");
+                            if !self.args.quiet {
+                                eprintln!("Zip in zip not supported.");
+                            }
                             // self.walk_zip(&path, &mut file)?;
                         } else {
                             self.search_file(&path, &mut file)?;
@@ -301,14 +317,19 @@ where
     }
 
     /// all reporting
-    fn report(&self, file: &str, line: &str) -> Result<()> {
+    fn report(&self, file: &str, line: &str) -> Result<bool> {
         if self.args.no_file {
             stdout().write_fmt(format_args!("{line}\n"))?;
         } else if self.args.file_only {
+            let file = if self.args.zip_only {
+                file.split(&self.args.zip_delimiter).next().unwrap_or(file)
+            } else {
+                file
+            };
             stdout().write_fmt(format_args!("{}\n", file))?;
         } else {
             stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?;
         }
-        Ok(())
+        Ok(self.args.file_only || self.args.zip_only)
     }
 }
