@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::{atomic::AtomicU64, Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use zip::read::read_zipfile_from_stream;
 
@@ -40,9 +40,12 @@ fn main() -> Result<()> {
         ZipDirAnalyzer::run(args, RegexProcessor { regex })
     }
 }
-
+struct PathInfo<'a> {
+    str: &'a str,
+    time: SystemTime,
+}
 trait TextProcessor: Send + Clone {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
+    fn grep_file<T: Read>(&self, path: &PathInfo, data: T) -> Result<bool>;
 }
 #[derive(Clone)]
 struct JqProcessor {
@@ -53,7 +56,7 @@ struct RegexProcessor {
     regex: Regex,
 }
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
+    fn grep_file<T: Read>(&self, path: &PathInfo, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {
@@ -86,8 +89,8 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
 }
 impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
     /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
-        let status = format!("processing: {path}");
+    fn grep_file<T: Read>(&self, path: &PathInfo, data: T) -> Result<bool> {
+        let status = format!("processing: {}",path.str);
         self.progress.set_message(status);
 
         let mut consecutive_error_count = 0;
@@ -178,6 +181,10 @@ pub struct Args {
     /// Use jaq (similar to jq) to query JSON files instead of regex.
     #[arg(long, default_value_t = false)]
     jq: bool,
+
+    /// List file time stamp
+    #[arg(long, default_value_t = false)]
+    timestamp: bool,
 }
 
 #[derive(Clone)]
@@ -317,18 +324,18 @@ where
     }
 
     /// all reporting
-    fn report(&self, file: &str, line: &str) -> Result<bool> {
+    fn report(&self, file: &PathInfo, line: &str) -> Result<bool> {
         if self.args.no_file {
             stdout().write_fmt(format_args!("{line}\n"))?;
         } else if self.args.file_only {
             let file = if self.args.zip_only {
-                file.split(&self.args.zip_delimiter).next().unwrap_or(file)
+                file.str.split(&self.args.zip_delimiter).next().unwrap_or(file.str)
             } else {
-                file
+                file.str
             };
             stdout().write_fmt(format_args!("{}\n", file))?;
         } else {
-            stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?;
+            stdout().write_fmt(format_args!("{}{}{}\n", file.str, self.args.delimiter, line))?;
         }
         Ok(self.args.file_only || self.args.zip_only)
     }
