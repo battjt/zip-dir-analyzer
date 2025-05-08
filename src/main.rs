@@ -13,7 +13,6 @@ use std::{
     thread,
     time::Duration,
 };
-use zip::read::read_zipfile_from_stream;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -285,26 +284,22 @@ where
         Ok(())
     }
 
-    /// path is a zip, so unzip and process each entry
-    fn walk_zip<R: Read>(&self, path: &str, read: &mut R) -> Result<()> {
-        loop {
-            match read_zipfile_from_stream(read)? {
-                Some(mut file) => {
-                    if !file.is_dir() {
-                        let path = path.to_string() + &self.args.zip_delimiter + file.name();
-                        if file.name().ends_with(".zip") {
-                            if !self.args.quiet {
-                                eprintln!("Zip in zip not supported.");
-                            }
-                            // self.walk_zip(&path, &mut file)?;
-                        } else {
-                            self.search_file(&path, &mut file)?;
-                        }
-                    }
+    fn walk_zip(&self, path: &str, zip_file: &mut File) -> Result<()> {
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+        for i in 0..archive.len() {
+            let zip_file = archive.by_index(i)?;
+            if zip_file.is_dir() {
+                // just a directory placeholder.
+            } else {
+                let file_name = path.to_string() + "!" + zip_file.name();
+                if file_name.ends_with(".zip") {
+                    eprintln!("No support for a zip of a zip yet {file_name}");
+                } else {
+                    self.search_file(&file_name, zip_file)?;
                 }
-                None => return Ok(()),
             }
         }
+        Ok(())
     }
 
     fn search_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
