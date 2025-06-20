@@ -18,8 +18,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     if args.jq {
         let mut ctx = ParseCtx::new(Vec::new());
-        ctx.insert_natives(jaq_core::core());
-        ctx.insert_defs(jaq_std::std());
+        // ctx.insert_natives(jaq_core::core());
+        // ctx.insert_defs(jaq_std::std());
 
         let (f, errs) = jaq_parse::parse(&args.pattern, jaq_parse::main());
         if !errs.is_empty() {
@@ -216,7 +216,7 @@ where
 
         if binding == "-" {
             for line in io::stdin().lines() {
-                zip_dir_analyzer.walk_path(Path::new(line?.as_str()))?
+                zip_dir_analyzer.schedule_walk_path(Path::new(line?.as_str()));
             }
         } else {
             zip_dir_analyzer.walk_path(Path::new(binding.as_str()))?;
@@ -261,27 +261,32 @@ where
     /// path is a directory.  Process each entry in a separate thread.
     fn walk_dir(&self, path: &Path) -> Result<()> {
         for entry in std::fs::read_dir(path)? {
-            self.ops_scheduled
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            let quiet = self.args.quiet;
-            let self_clone = self.clone();
             let path_buf = entry?.path();
-            self.pool.lock().unwrap().execute(move || {
-                let result = self_clone.walk_path(path_buf.as_path());
-                if result.is_err() && !quiet {
-                    eprintln!(
-                        "WARN: {} skipped due to {}",
-                        path_buf.to_str().unwrap(),
-                        result.unwrap_err()
-                    );
-                }
-                self_clone
-                    .ops_complete
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            });
+
+            self.schedule_walk_path(path_buf.as_path());
         }
         Ok(())
+    }
+
+    fn schedule_walk_path(&self, path: &std::path::Path) {
+        self.ops_scheduled
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let self_clone = self.clone();
+        let path = path.to_path_buf();
+        self.pool.lock().unwrap().execute(move || {
+            let result = self_clone.walk_path(&path);
+            if result.is_err() && !self_clone.args.quiet {
+                eprintln!(
+                    "WARN: {} skipped due to {}",
+                    path.to_str().unwrap(),
+                    result.unwrap_err()
+                );
+            }
+            self_clone
+                .ops_complete
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
     }
 
     fn walk_zip(&self, path: &str, zip_file: &mut File) -> Result<()> {
