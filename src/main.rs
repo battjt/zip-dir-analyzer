@@ -2,122 +2,34 @@ use anyhow::{Ok, Result};
 use clap::Parser;
 use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
 use indicatif::{ProgressBar, ProgressStyle};
-use jaq_interpret::{Ctx, Filter, FilterT, ParseCtx, RcIter, Val};
 use regex::Regex;
-use serde_json::Value;
 use std::{
     fs::{self, File},
-    io::{self, stdout, BufRead, Read, Write},
+    io::{self, Read},
     path::Path,
     sync::{atomic::AtomicU64, Arc, Mutex},
     thread,
     time::Duration,
 };
 
+use crate::{jq_processor::JqProcessor, regex_processor::RegexProcessor};
+
+mod jq_processor;
+mod regex_processor;
+mod shared_iterator;
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let pattern = &args.pattern.clone();
     if args.jq {
-        let mut ctx = ParseCtx::new(Vec::new());
-        // ctx.insert_natives(jaq_core::core());
-        // ctx.insert_defs(jaq_std::std());
-
-        let (f, errs) = jaq_parse::parse(&args.pattern, jaq_parse::main());
-        if !errs.is_empty() {
-            let error_message = errs
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(anyhow::anyhow!(error_message));
-        }
-
-        let filter = ctx.compile(f.unwrap());
-
-        ZipDirAnalyzer::run(args, JqProcessor { filter })
+        ZipDirAnalyzer::run(args, JqProcessor::new(pattern)?)
     } else {
-        let regex = Regex::new(&args.pattern)?;
-        ZipDirAnalyzer::run(args, RegexProcessor { regex })
+        ZipDirAnalyzer::run(args, RegexProcessor::new(pattern)?)
     }
 }
 
 trait TextProcessor: Send + Clone {
     fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
-}
-#[derive(Clone)]
-struct JqProcessor {
-    filter: Filter,
-}
-#[derive(Clone)]
-struct RegexProcessor {
-    regex: Regex,
-}
-impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
-        let value: Result<Value, _> = serde_json::from_reader(data);
-        match value {
-            Result::Ok(value) => {
-                let inputs = RcIter::new(core::iter::empty());
-                let out = self
-                    .processor
-                    .filter
-                    .run((Ctx::new([], &inputs), Val::from(value)));
-                for o in out {
-                    match o {
-                        Result::Ok(json_val) => {
-                            if self.report(path, json_val.as_str().unwrap())? {
-                                return Ok(true);
-                            }
-                        }
-                        Err(err) => {
-                            println!("Error: {}", err);
-                        }
-                    };
-                }
-            }
-            Err(je) => {
-                if !self.args.quiet {
-                    println!("JSON Error: {}", je)
-                }
-            }
-        };
-        Ok(false)
-    }
-}
-impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
-    /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
-        let status = format!("processing: {path}");
-        self.progress.set_message(status);
-
-        let mut consecutive_error_count = 0;
-        for r in io::BufReader::new(data).lines() {
-            match r {
-                Err(err) => {
-                    if consecutive_error_count > self.args.max_errors {
-                        if !self.args.quiet {
-                            eprintln!(
-                                "WARN: {path} skipping file ({} consecutive errors) {err}",
-                                self.args.max_errors
-                            );
-                        }
-                        // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
-                        break;
-                    }
-                    if !self.args.quiet {
-                        eprintln!("WARN: {path} skipped line due to {err}");
-                    }
-                    consecutive_error_count += 1;
-                }
-                Result::Ok(line) => {
-                    if self.processor.regex.is_match(&line) && self.report(path, &line)? {
-                        return Ok(true);
-                    }
-                    consecutive_error_count = 0;
-                }
-            }
-        }
-        Ok(false)
-    }
 }
 
 /// Search directory for files matching the file_pat that include the line_pat. The contents of zip files are also searched.
@@ -177,6 +89,10 @@ pub struct Args {
     /// Use jaq (similar to jq) to query JSON files instead of regex.
     #[arg(long, default_value_t = false)]
     jq: bool,
+
+    /// How many lines after match should be reported
+    #[arg(long, short = 'A', default_value_t = 0)]
+    after: u32,
 }
 
 #[derive(Clone)]
@@ -197,13 +113,13 @@ where
 {
     /// Main entry point.
     pub fn run(args: Args, processor: TP) -> Result<()> {
-        let binding = args.directory.clone();
+        let directory = args.directory.clone();
         let zip_dir_analyzer = ZipDirAnalyzer {
             pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
             ops_scheduled: Default::default(),
             ops_complete: Default::default(),
             processor,
-            file_regex: regex::Regex::new(&args.file_pat)?,
+            file_regex: Regex::new(&args.file_pat)?,
             args,
             progress: ProgressBar::new(100),
         };
@@ -214,12 +130,12 @@ where
                 "{bar} {pos}/{len} {wide_msg}",
             )?);
 
-        if binding == "-" {
+        if directory == "-" {
             for line in io::stdin().lines() {
                 zip_dir_analyzer.schedule_walk_path(Path::new(line?.as_str()));
             }
         } else {
-            zip_dir_analyzer.walk_path(Path::new(binding.as_str()))?;
+            zip_dir_analyzer.walk_path(Path::new(directory.as_str()))?;
         }
         let mut scheduled = 1;
         let mut complete = 0;
@@ -261,14 +177,13 @@ where
     /// path is a directory.  Process each entry in a separate thread.
     fn walk_dir(&self, path: &Path) -> Result<()> {
         for entry in std::fs::read_dir(path)? {
-            let path_buf = entry?.path();
-
-            self.schedule_walk_path(path_buf.as_path());
+            self.schedule_walk_path(entry?.path().as_path());
         }
         Ok(())
     }
 
     fn schedule_walk_path(&self, path: &std::path::Path) {
+        // increment scheduled ops
         self.ops_scheduled
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -276,6 +191,7 @@ where
         let path = path.to_path_buf();
         self.pool.lock().unwrap().execute(move || {
             let result = self_clone.walk_path(&path);
+            // log any failure
             if result.is_err() && !self_clone.args.quiet {
                 eprintln!(
                     "WARN: {} skipped due to {}",
@@ -283,6 +199,7 @@ where
                     result.unwrap_err()
                 );
             }
+            // decrement scheduled ops
             self_clone
                 .ops_complete
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -317,18 +234,25 @@ where
     }
 
     /// all reporting
-    fn report(&self, file: &str, line: &str) -> Result<bool> {
+    fn report(&self, file: &str, lines: &mut dyn Iterator<Item = String>) -> Result<bool> {
         if self.args.no_file {
-            stdout().write_fmt(format_args!("{line}\n"))?;
+            if let Some(line) = lines.next() {
+                println!("{line}");
+            }
         } else if self.args.file_only {
             let file = if self.args.zip_only {
                 file.split(&self.args.zip_delimiter).next().unwrap_or(file)
             } else {
                 file
             };
-            stdout().write_fmt(format_args!("{}\n", file))?;
+            println!("{file}");
         } else {
-            stdout().write_fmt(format_args!("{}{}{}\n", file, self.args.delimiter, line))?;
+            let delimiter = &self.args.delimiter;
+            for _ in 0..self.args.after + 1 {
+                if let Some(line) = lines.next() {
+                    println!("{file}{delimiter}{line}");
+                }
+            }
         }
         Ok(self.args.file_only || self.args.zip_only)
     }
