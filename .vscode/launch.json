@@ -19,8 +19,8 @@
                     "kind": "bin"
                 }
             },
-            "args": ["test",".*","car"],
-            "cwd": "${workspaceFolder}"
+            "args": ["--jq", "-q", "all", "./", ".*", "name"],
+            "cwd": "${workspaceFolder}/test"
         },
         {
             "type": "lldb",

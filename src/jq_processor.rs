@@ -45,7 +45,7 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
                     match o {
                         Result::Ok(json_val) => {
                             // optimize?
-                            let str = (**json_val.as_str().unwrap()).clone();
+                            let str = json_val.to_string_or_clone();
                             if self.report(path, &mut core::iter::once(str))? {
                                 return Ok(true);
                             }

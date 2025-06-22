@@ -1,5 +1,5 @@
 use anyhow::{Ok, Result};
-use clap::Parser;
+use clap::*;
 use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -32,12 +32,29 @@ trait TextProcessor: Send + Clone {
     fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
 }
 
-/// Search directory for files matching the file_pat that include the line_pat. The contents of zip files are also searched.
+#[derive(Debug, Default, Clone, ValueEnum)]
+enum Output {
+    #[default]
+    /// File name followed by the pattern match.
+    All,
+    /// File name. May be the name of a zip.
+    File,
+    /// File name, including zip file entries.
+    Entry,
+    /// The pattern match result.
+    Pattern,
+}
+
+/// Search directory for files matching the file_pat that include the pattern. The contents of zip files are also searched.
 ///
 /// The progress is reported as files processed from the filesystem, not files within the zips. X zips each of Y files will report X operations, not X*Y operations.
 #[derive(Parser, Debug, Default, Clone)]
 #[command(version, about)]
 pub struct Args {
+    /// What output is desired.
+    #[arg(value_enum)]
+    output: Output,
+
     /// Directory to search. Use '-' to indicate that the list of directories will be on stdin.
     #[arg()]
     directory: String,
@@ -46,7 +63,7 @@ pub struct Args {
     #[arg()]
     file_pat: String,
 
-    /// Report lines that match this regex.
+    /// Report lines that match this regex (or jq expression).
     #[arg()]
     pattern: String,
 
@@ -70,27 +87,15 @@ pub struct Args {
     #[arg(long, default_value_t=num_cpus::get())]
     parallel: usize,
 
-    /// Do not report file name in results.
-    #[arg(long)]
-    no_file: bool,
-
-    /// Only report the file name once in the results.
-    #[arg(long)]
-    file_only: bool,
-
-    /// Only report the zip name once in the results.
-    #[arg(long)]
-    zip_only: bool,
-
     /// Max consecutive errors to allow before skipping file.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     max_errors: usize,
 
     /// Use jaq (similar to jq) to query JSON files instead of regex.
     #[arg(long, default_value_t = false)]
     jq: bool,
 
-    /// How many lines after match should be reported
+    /// How many lines after matching line should be reported.
     #[arg(long, short = 'A', default_value_t = 0)]
     after: u32,
 }
@@ -235,25 +240,33 @@ where
 
     /// all reporting
     fn report(&self, file: &str, lines: &mut dyn Iterator<Item = String>) -> Result<bool> {
-        if self.args.no_file {
-            if let Some(line) = lines.next() {
-                println!("{line}");
-            }
-        } else if self.args.file_only {
-            let file = if self.args.zip_only {
-                file.split(&self.args.zip_delimiter).next().unwrap_or(file)
-            } else {
-                file
-            };
-            println!("{file}");
-        } else {
-            let delimiter = &self.args.delimiter;
-            for _ in 0..self.args.after + 1 {
-                if let Some(line) = lines.next() {
-                    println!("{file}{delimiter}{line}");
+        match self.args.output {
+            Output::All => {
+                let delimiter = &self.args.delimiter;
+                for _ in 0..self.args.after + 1 {
+                    if let Some(line) = lines.next() {
+                        println!("{file}{delimiter}{line}");
+                    }
                 }
+                Ok(false)
+            }
+            Output::File => {
+                let file = file.split(&self.args.zip_delimiter).next().unwrap_or(file);
+                println!("{file}");
+                Ok(true)
+            }
+            Output::Entry => {
+                println!("{file}");
+                Ok(true)
+            }
+            Output::Pattern => {
+                for _ in 0..self.args.after + 1 {
+                    if let Some(line) = lines.next() {
+                        println!("{line}");
+                    }
+                }
+                Ok(false)
             }
         }
-        Ok(self.args.file_only || self.args.zip_only)
     }
 }
