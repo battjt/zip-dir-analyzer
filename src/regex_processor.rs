@@ -17,9 +17,7 @@ impl RegexProcessor {
 }
 impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
     /// base file searching routine
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
-        self.progress.set_message(format!("processing: {path}"));
-
+    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let mut consecutive_error_count = 0;
         let mut lines = BufReader::new(data).lines();
         let lines = SharedIterator::new(&mut lines);

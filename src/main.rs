@@ -22,14 +22,14 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let pattern = &args.pattern.clone();
     if args.jq {
-        ZipDirAnalyzer::run(args, JqProcessor::new(pattern)?)
+        ZipDirAnalyzer::new(args, JqProcessor::new(pattern)?)?.run()
     } else {
-        ZipDirAnalyzer::run(args, RegexProcessor::new(pattern)?)
+        ZipDirAnalyzer::new(args, RegexProcessor::new(pattern)?)?.run()
     }
 }
 
 trait TextProcessor: Send + Clone {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
+    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
 }
 
 #[derive(Debug, Default, Clone, ValueEnum)]
@@ -122,46 +122,33 @@ where
     TP: Send + Clone + 'static,
 {
     /// Main entry point.
-    pub fn run(args: Args, processor: TP) -> Result<()> {
-        let directory = args.directory.clone();
-        let zip_dir_analyzer = ZipDirAnalyzer {
-            pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
-            stdout_lock: Arc::new(Mutex::new(())),
-            ops_scheduled: Default::default(),
-            ops_complete: Default::default(),
-            processor,
-            file_regex: Regex::new(&args.file_pat)?,
-            args,
-            progress: ProgressBar::new(100),
-        };
+    pub fn run(&self) -> Result<()> {
+        self.progress.set_style(ProgressStyle::with_template(
+            "{bar} {pos}/{len} {wide_msg}",
+        )?);
 
-        zip_dir_analyzer
-            .progress
-            .set_style(ProgressStyle::with_template(
-                "{bar} {pos}/{len} {wide_msg}",
-            )?);
-
-        if directory == "-" {
+        if self.args.directory == "-" {
             for line in io::stdin().lines() {
-                zip_dir_analyzer.schedule_walk_path(Path::new(line?.as_str()));
+                self.schedule_walk_path(Path::new(line?.as_str()));
             }
         } else {
-            zip_dir_analyzer.walk_path(Path::new(directory.as_str()))?;
+            self.schedule_walk_path(Path::new(self.args.directory.as_str()));
         }
         let mut scheduled = 1;
         let mut complete = 0;
         // wait for all processing to complete
         while scheduled > complete {
-            scheduled = zip_dir_analyzer
+            thread::sleep(Duration::from_millis(50));
+            scheduled = self
                 .ops_scheduled
                 .load(std::sync::atomic::Ordering::Relaxed);
-            complete = zip_dir_analyzer
-                .ops_complete
-                .load(std::sync::atomic::Ordering::Relaxed);
-            zip_dir_analyzer.progress.set_length(scheduled);
-            zip_dir_analyzer.progress.set_position(complete);
-            thread::sleep(Duration::from_millis(50));
+            complete = self.ops_complete.load(std::sync::atomic::Ordering::Relaxed);
+            self.progress.set_length(scheduled);
+            self.progress.set_position(complete);
         }
+        self.progress
+            .println(format!("Complete {complete} of {scheduled}"));
+
         Ok(())
     }
 
@@ -174,12 +161,14 @@ where
             let mut file = fs::File::open(path)?;
             self.walk_zip(path_str, &mut file)
         } else if path.is_file() {
-            self.grep_file(path_str, &File::open(path)?)?;
+            self.progress.set_message(format!("processing: {path_str}"));
+            self.process_file(path_str, &File::open(path)?)?;
             Ok(())
         } else {
             // skipping links and devices and such
             if self.args.verbose {
-                eprintln!("INFO: skipping non-file {}", path_str);
+                self.progress
+                    .println(format!("INFO: skipping non-file {}", path_str));
             }
             Ok(())
         }
@@ -200,15 +189,16 @@ where
 
         let self_clone = self.clone();
         let path = path.to_path_buf();
+        let progress_bar = self.progress.clone();
         self.pool.lock().unwrap().execute(move || {
             let result = self_clone.walk_path(&path);
             // log any failure
             if result.is_err() && !self_clone.args.quiet {
-                eprintln!(
+                progress_bar.println(format!(
                     "WARN: {} skipped due to {}",
                     path.to_str().unwrap(),
                     result.unwrap_err()
-                );
+                ));
             }
             // decrement scheduled ops
             self_clone
@@ -226,7 +216,8 @@ where
             } else {
                 let file_name = path.to_string() + "!" + zip_file.name();
                 if file_name.ends_with(".zip") {
-                    eprintln!("No support for a zip of a zip yet {file_name}");
+                    self.progress
+                        .println("No support for a zip of a zip yet {file_name}");
                 } else {
                     self.search_file(&file_name, zip_file)?;
                 }
@@ -237,9 +228,10 @@ where
 
     fn search_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
         if self.file_regex.is_match(path) {
-            self.grep_file(path, data)?;
+            self.progress.set_message(format!("processing: {path}"));
+            self.process_file(path, data)?;
         } else if self.args.verbose {
-            eprintln!("INFO: skipping {}", path);
+            self.progress.println(format!("INFO: skipping {}", path));
         }
         Ok(())
     }
@@ -277,5 +269,21 @@ where
                 Ok(false)
             }
         }
+    }
+
+    pub fn new(args: Args, processor: TP) -> Result<ZipDirAnalyzer<TP>, anyhow::Error>
+    where
+        TP: Send + Clone + 'static,
+    {
+        Ok(ZipDirAnalyzer {
+            pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
+            stdout_lock: Arc::new(Mutex::new(())),
+            ops_scheduled: Default::default(),
+            ops_complete: Default::default(),
+            processor,
+            file_regex: Regex::new(&args.file_pat)?,
+            args,
+            progress: ProgressBar::new(100),
+        })
     }
 }

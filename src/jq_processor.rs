@@ -32,7 +32,7 @@ impl JqProcessor {
     }
 }
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn grep_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
+    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {
