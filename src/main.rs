@@ -83,6 +83,10 @@ pub struct Args {
     #[arg(long, short = 'z', default_value = "!")]
     zip_delimiter: String,
 
+    /// Delimiter between lines when `after` is used.
+    #[arg(long, default_value = "\n")]
+    line_delimiter: String,
+
     /// How many directories to process in parallel.
     #[arg(long, default_value_t=num_cpus::get())]
     parallel: usize,
@@ -103,6 +107,7 @@ pub struct Args {
 #[derive(Clone)]
 struct ZipDirAnalyzer<TP: Send + Clone> {
     pool: Arc<Mutex<ThreadPoolExecutor>>,
+    stdout_lock: Arc<Mutex<()>>,
     ops_scheduled: Arc<AtomicU64>,
     ops_complete: Arc<AtomicU64>,
     processor: TP,
@@ -121,6 +126,7 @@ where
         let directory = args.directory.clone();
         let zip_dir_analyzer = ZipDirAnalyzer {
             pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
+            stdout_lock: Arc::new(Mutex::new(())),
             ops_scheduled: Default::default(),
             ops_complete: Default::default(),
             processor,
@@ -240,16 +246,8 @@ where
 
     /// all reporting
     fn report(&self, file: &str, lines: &mut dyn Iterator<Item = String>) -> Result<bool> {
+        let _io = self.stdout_lock.lock();
         match self.args.output {
-            Output::All => {
-                let delimiter = &self.args.delimiter;
-                for _ in 0..self.args.after + 1 {
-                    if let Some(line) = lines.next() {
-                        println!("{file}{delimiter}{line}");
-                    }
-                }
-                Ok(false)
-            }
             Output::File => {
                 let file = file.split(&self.args.zip_delimiter).next().unwrap_or(file);
                 println!("{file}");
@@ -259,12 +257,23 @@ where
                 println!("{file}");
                 Ok(true)
             }
+            Output::All => {
+                let delimiter = &self.args.delimiter;
+                let line_delimiter = &self.args.line_delimiter;
+                let s = lines
+                    .take(1 + self.args.after as usize)
+                    .map(|line| format!("{file}{delimiter}{line}"))
+                    .fold(String::new(), |a, b| a + line_delimiter + &b);
+                println!("{s}");
+                Ok(false)
+            }
             Output::Pattern => {
-                for _ in 0..self.args.after + 1 {
-                    if let Some(line) = lines.next() {
-                        println!("{line}");
-                    }
-                }
+                let line_delimiter = &self.args.line_delimiter;
+                let s = lines
+                    .take(1 + self.args.after as usize)
+                    .map(|line| line.to_string())
+                    .fold(String::new(), |a, b| a + line_delimiter + &b);
+                println!("{s}");
                 Ok(false)
             }
         }
