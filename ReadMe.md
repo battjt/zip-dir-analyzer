@@ -18,10 +18,15 @@ Let's find all of the application log file and then from those, all of the NullP
 6. report
 
 ```bash
-zip-dir-analyze -jq file ./ 'manifest' '.name="application log"' | 
-  zip-dir-analyze pattern -A 8 --line-delimiter '###' - '.*' 'NullPointerException'
+# find application logs for version 1.24.36
+zip-dir-analyze --jq file ./ 'manifest' 'select(.applicationVersion=="1.24.36" and .tags[]=="application log")' |
+  # find stack traces in logs, concat into single lines
+  zip-dir-analyze pattern -A 8 --line-delimiter '###' - '.*\.log' '^[^ ]*Exception:'
+  # get uniq counts
   sort |
   uniq -c |
+  # sort by prevalence
   sort -rn |
-  sed 's/###/\n/g'
+  3 expand back to multiline form
+  sed -e 's/\n\n/\n/g' -e 's/###/\n/g'
 ```
