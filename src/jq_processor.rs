@@ -1,52 +1,63 @@
+use crate::{TextProcessor, ZipDirAnalyzer};
+use anyhow::Result;
+use jaq_core::{
+    load::{Arena, File, Loader},
+    Ctx, Filter, Native, RcIter,
+};
+use jaq_json::Val;
+use serde_json::Value;
 use std::io::Read;
 
-use anyhow::Result;
-use jaq_interpret::{Ctx, Filter, FilterT, ParseCtx, RcIter, Val};
-use serde_json::Value;
+type JqFileType = ();
 
-use crate::{TextProcessor, ZipDirAnalyzer};
-
-/// Under development
 #[derive(Clone)]
 pub struct JqProcessor {
-    filter: Filter,
+    filter: Filter<Native<Val>>,
 }
 
 impl JqProcessor {
-    pub fn new(filter: &str) -> Result<Self> {
-        let mut ctx = ParseCtx::new(Vec::new());
-        // ctx.insert_natives(jaq_core::core());
-        // ctx.insert_defs(jaq_std::std());
-        let (f, errs) = jaq_parse::parse(filter, jaq_parse::main());
-        if !errs.is_empty() {
-            let error_message = errs
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(anyhow::anyhow!(error_message));
-        }
+    pub fn new(filter_expr: &str) -> Result<Self> {
+        let loader = Loader::new(
+            // ToDo: Allow custom preludes?
+            jaq_std::defs().chain(jaq_json::defs()), //.chain(semconv_prelude()), // [],
+        );
+        let arena = Arena::default();
+        let program: File<&str, JqFileType> = File {
+            code: filter_expr,
+            path: (), // ToDo - give this the weaver-config location.
+        };
 
-        let filter = ctx.compile(f.expect("Failed to parse JQ"));
+        // parse the filter
+        let modules = loader
+            .load(&arena, program)
+            .expect("Unable to load JAQ program");
+
+        let funs = jaq_std::funs().chain(jaq_json::funs());
+        #[allow(clippy::map_identity)]
+        let filter = jaq_core::Compiler::<_, Native<_>>::default()
+            // To trick compiler, we re-borrow `&'static str` with shorter lifetime.
+            // This is *NOT* a simple identity function, but a lifetime inference workaround.
+            .with_funs(funs.map(|x| x))
+            .compile(modules)
+            .expect("Unable to compile JAQ modules");
         Ok(Self { filter })
     }
 }
+
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
     fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {
                 let inputs = RcIter::new(core::iter::empty());
-                let out = self
+                let results = self
                     .processor
                     .filter
-                    .run((Ctx::new([], &inputs), Val::from(value)));
-                for o in out {
-                    match o {
+                    .run((Ctx::new([], &inputs), Val::from(value.clone())));
+                for result in results {
+                    match result {
                         Result::Ok(json_val) => {
-                            // optimize?
-                            let str = json_val.to_string_or_clone();
-                            if self.report(path, &mut core::iter::once(str))? {
+                            if self.report(path, &mut core::iter::once(json_val.to_string()))? {
                                 return Ok(true);
                             }
                         }

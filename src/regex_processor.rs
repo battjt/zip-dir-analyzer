@@ -1,8 +1,8 @@
 use anyhow::{Ok, Result};
 use regex::Regex;
 use std::io::{BufRead, BufReader, Read};
-
 use crate::{shared_iterator::SharedIterator, TextProcessor, ZipDirAnalyzer};
+
 #[derive(Clone)]
 pub struct RegexProcessor {
     regex: Regex,
