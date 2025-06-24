@@ -17,16 +17,16 @@ Let's find all of the application log file and then from those, all of the NullP
 5. sort by most frequent
 6. report
 
+_run in "git bash", so `/bin/sort` avoids the Windows `sort` command_
 ```bash
 # find application logs for version 1.24.36
 zip-dir-analyze --jq file ./ 'manifest' 'select(.applicationVersion=="1.24.36" and .tags[]=="application log")' |
   # find stack traces in logs, concat into single lines
-  zip-dir-analyze pattern -A 8 --line-delimiter '###' - '.*\.log' '^[^ ]*Exception:'
+  zip-dir-analyze pattern --after 8 --line-delimiter '###' - '.*\.log' '^[^ ]*Exception:'
   # get uniq counts
-  sort |
-  uniq -c |
+  /bin/sort | uniq -c |
   # sort by prevalence
-  sort -rn |
-  3 expand back to multiline form
+  /bin/sort -rn |
+  # expand back to multiline form
   sed -e 's/\n\n/\n/g' -e 's/###/\n/g'
 ```
