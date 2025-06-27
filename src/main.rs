@@ -189,7 +189,8 @@ where
                 let s = lines
                     .take(1 + self.args.after as usize)
                     .map(|line| format!("{file}{delimiter}{line}"))
-                    .fold(String::new(), |a, b| a + line_delimiter + &b);
+                    .collect::<Vec<String>>()
+                    .join(line_delimiter);
                 println!("{s}");
                 Ok(false)
             }
@@ -198,7 +199,8 @@ where
                 let s = lines
                     .take(1 + self.args.after as usize)
                     .map(|line| line.to_string())
-                    .fold(String::new(), |a, b| a + line_delimiter + &b);
+                    .collect::<Vec<String>>()
+                    .join(line_delimiter);
                 println!("{s}");
                 Ok(false)
             }
