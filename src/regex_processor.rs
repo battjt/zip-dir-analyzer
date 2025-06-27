@@ -1,7 +1,7 @@
+use crate::{shared_iterator::SharedIterator, TextProcessor, ZipDirAnalyzer};
 use anyhow::{Ok, Result};
 use regex::Regex;
 use std::io::{BufRead, BufReader, Read};
-use crate::{shared_iterator::SharedIterator, TextProcessor, ZipDirAnalyzer};
 
 #[derive(Clone)]
 pub struct RegexProcessor {
@@ -27,16 +27,17 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                 Err(err) => {
                     if consecutive_error_count > self.args.max_errors {
                         if !self.args.quiet {
-                            eprintln!(
+                            self.progress.println(format!(
                                 "WARN: {path} skipping file ({} consecutive errors) {err}",
                                 self.args.max_errors
-                            );
+                            ));
                         }
                         // After too many consecutive errors, skip file. This allows some corrupt lines to be skipped and when there is a terminal error, the whole file will be skipped.
                         break;
                     }
                     if !self.args.quiet {
-                        eprintln!("WARN: {path} skipped line due to {err}");
+                        self.progress
+                            .println(format!("WARN: {path} skipped line due to {err}"));
                     }
                     consecutive_error_count += 1;
                 }

@@ -1,6 +1,5 @@
 use anyhow::{Ok, Result};
 use clap::*;
-use executors::{threadpool_executor::ThreadPoolExecutor, Executor};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use std::{
@@ -11,6 +10,7 @@ use std::{
     thread,
     time::Duration,
 };
+use threadpool::ThreadPool;
 
 use crate::{jq_processor::JqProcessor, regex_processor::RegexProcessor};
 
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     }
 }
 
-trait TextProcessor: Send + Clone {
+trait TextProcessor: Send {
     fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
 }
 
@@ -87,8 +87,8 @@ pub struct Args {
     #[arg(long, default_value = "\n")]
     line_delimiter: String,
 
-    /// How many directories to process in parallel.
-    #[arg(long, default_value_t=num_cpus::get())]
+    /// How many files to process in parallel.
+    #[arg(long, default_value_t=2 * num_cpus::get())]
     parallel: usize,
 
     /// Max consecutive errors to allow before skipping file.
@@ -104,125 +104,51 @@ pub struct Args {
     after: u32,
 }
 
-#[derive(Clone)]
-struct ZipDirAnalyzer<TP: Send + Clone> {
-    pool: Arc<Mutex<ThreadPoolExecutor>>,
-    stdout_lock: Arc<Mutex<()>>,
-    ops_scheduled: Arc<AtomicU64>,
-    ops_complete: Arc<AtomicU64>,
+struct ZipDirAnalyzer<TP> {
+    pool: ThreadPool,
+    stdout_lock: Mutex<()>,
+    ops_complete: AtomicU64,
     processor: TP,
     file_regex: Regex,
     args: Args,
     progress: ProgressBar,
 }
 
-impl<TP> ZipDirAnalyzer<TP>
+impl<TP: Send + Sync + 'static> ZipDirAnalyzer<TP>
 where
     ZipDirAnalyzer<TP>: TextProcessor,
-    TP: Send + Clone + 'static,
 {
     /// Main entry point.
-    pub fn run(&self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         self.progress.set_style(ProgressStyle::with_template(
             "{bar} {pos}/{len} {wide_msg}",
         )?);
 
-        if self.args.directory == "-" {
-            for line in io::stdin().lines() {
-                self.schedule_walk_path(Path::new(line?.as_str()));
+        let this = Arc::new(self);
+        let c = this.clone();
+        this.pool.execute(move || {
+            if c.args.directory == "-" {
+                for line in io::stdin().lines() {
+                    c.schedule_walk_path(Path::new(line.unwrap().as_str()));
+                }
+            } else {
+                c.schedule_walk_path(Path::new(c.args.directory.as_str()));
             }
-        } else {
-            self.schedule_walk_path(Path::new(self.args.directory.as_str()));
-        }
+        });
+
         let mut scheduled = 1;
         let mut complete = 0;
         // wait for all processing to complete
         while scheduled > complete {
             thread::sleep(Duration::from_millis(50));
-            scheduled = self
-                .ops_scheduled
-                .load(std::sync::atomic::Ordering::Relaxed);
-            complete = self.ops_complete.load(std::sync::atomic::Ordering::Relaxed);
-            self.progress.set_length(scheduled);
-            self.progress.set_position(complete);
+            complete = this.ops_complete.load(std::sync::atomic::Ordering::Relaxed);
+            scheduled = (this.pool.active_count() + this.pool.queued_count()) as u64 + complete;
+            this.progress.set_length(scheduled);
+            this.progress.set_position(complete);
         }
-        self.progress
+        this.progress
             .println(format!("Complete {complete} of {scheduled}"));
 
-        Ok(())
-    }
-
-    /// evaluate how to process the path
-    fn walk_path(&self, path: &Path) -> Result<()> {
-        let path_str = path.to_str().unwrap();
-        if path.is_dir() {
-            self.walk_dir(path)
-        } else if path_str.ends_with(".zip") {
-            let mut file = fs::File::open(path)?;
-            self.walk_zip(path_str, &mut file)
-        } else if path.is_file() {
-            self.progress.set_message(format!("processing: {path_str}"));
-            self.process_file(path_str, &File::open(path)?)?;
-            Ok(())
-        } else {
-            // skipping links and devices and such
-            if self.args.verbose {
-                self.progress
-                    .println(format!("INFO: skipping non-file {}", path_str));
-            }
-            Ok(())
-        }
-    }
-
-    /// path is a directory.  Process each entry in a separate thread.
-    fn walk_dir(&self, path: &Path) -> Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            self.schedule_walk_path(entry?.path().as_path());
-        }
-        Ok(())
-    }
-
-    fn schedule_walk_path(&self, path: &std::path::Path) {
-        // increment scheduled ops
-        self.ops_scheduled
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let self_clone = self.clone();
-        let path = path.to_path_buf();
-        let progress_bar = self.progress.clone();
-        self.pool.lock().unwrap().execute(move || {
-            let result = self_clone.walk_path(&path);
-            // log any failure
-            if result.is_err() && !self_clone.args.quiet {
-                progress_bar.println(format!(
-                    "WARN: {} skipped due to {}",
-                    path.to_str().unwrap(),
-                    result.unwrap_err()
-                ));
-            }
-            // decrement scheduled ops
-            self_clone
-                .ops_complete
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-    }
-
-    fn walk_zip(&self, path: &str, zip_file: &mut File) -> Result<()> {
-        let mut archive = zip::ZipArchive::new(zip_file)?;
-        for i in 0..archive.len() {
-            let zip_file = archive.by_index(i)?;
-            if zip_file.is_dir() {
-                // just a directory placeholder.
-            } else {
-                let file_name = path.to_string() + "!" + zip_file.name();
-                if file_name.ends_with(".zip") {
-                    self.progress
-                        .println("No support for a zip of a zip yet {file_name}");
-                } else {
-                    self.search_file(&file_name, zip_file)?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -231,7 +157,7 @@ where
             self.progress.set_message(format!("processing: {path}"));
             self.process_file(path, data)?;
         } else if self.args.verbose {
-            self.progress.println(format!("INFO: skipping {}", path));
+            self.progress.println(format!("INFO: skipping {path}"));
         }
         Ok(())
     }
@@ -271,19 +197,91 @@ where
         }
     }
 
-    pub fn new(args: Args, processor: TP) -> Result<ZipDirAnalyzer<TP>, anyhow::Error>
+    pub fn new(args: Args, processor: TP) -> Result<ZipDirAnalyzer<TP>>
     where
-        TP: Send + Clone + 'static,
+        TP: Send + 'static,
     {
         Ok(ZipDirAnalyzer {
-            pool: Arc::new(Mutex::new(ThreadPoolExecutor::new(args.parallel))),
-            stdout_lock: Arc::new(Mutex::new(())),
-            ops_scheduled: Default::default(),
+            pool: ThreadPool::with_name("worker".to_string(), args.parallel),
+            stdout_lock: Mutex::new(()),
             ops_complete: Default::default(),
             processor,
             file_regex: Regex::new(&args.file_pat)?,
             args,
             progress: ProgressBar::new(100),
         })
+    }
+
+    /// path is a directory.  Process each entry in a separate thread.
+    fn walk_dir(self: &Arc<Self>, path: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(path)? {
+            self.schedule_walk_path(entry?.path().as_path());
+        }
+        Ok(())
+    }
+
+    fn schedule_walk_path(self: &Arc<Self>, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        let c = self.clone();
+        self.pool.execute(move || {
+            c.walk_path(&path)
+                .unwrap_or_else(|_| panic!("Failed to walk path {path:?}"));
+        });
+    }
+
+    fn walk_path(self: &Arc<Self>, path: &Path) -> Result<()> {
+        // increment ops complete, before the work, so that a failure will not
+        self.ops_complete
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let result = {
+            let this = &self;
+            let path_str = path.to_str().unwrap();
+            if path.is_dir() {
+                this.walk_dir(path)
+            } else if path_str.ends_with(".zip") {
+                let mut file = fs::File::open(path)?;
+                this.walk_zip(path_str, &mut file)
+            } else if path.is_file() {
+                this.progress.set_message(format!("processing: {path_str}"));
+                this.process_file(path_str, &File::open(path)?)?;
+                Ok(())
+            } else {
+                // skipping links and devices and such
+                if this.args.verbose {
+                    this.progress
+                        .println(format!("INFO: skipping non-file {path_str}"));
+                }
+                Ok(())
+            }
+        };
+        // log any failure
+        if result.is_err() && !self.args.quiet {
+            self.progress.println(format!(
+                "WARN: {} skipped due to {}",
+                path.to_str().unwrap(),
+                result.unwrap_err()
+            ));
+        }
+        Ok(())
+    }
+
+    fn walk_zip(self: &Arc<Self>, path: &str, zip_file: &mut File) -> Result<()> {
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+        for i in 0..archive.len() {
+            let zip_file = archive.by_index(i)?;
+            if zip_file.is_dir() {
+                // just a directory placeholder.
+            } else {
+                let file_name = path.to_string() + "!" + zip_file.name();
+                if file_name.ends_with(".zip") {
+                    self.progress
+                        .println(format!("No support for a zip of a zip yet {file_name}"));
+                } else {
+                    self.search_file(&file_name, zip_file)?;
+                }
+            }
+        }
+        Ok(())
     }
 }

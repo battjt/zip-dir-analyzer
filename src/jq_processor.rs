@@ -62,14 +62,14 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
                             }
                         }
                         Err(err) => {
-                            println!("Error: {}", err);
+                            println!("Error: {err}");
                         }
                     };
                 }
             }
             Err(je) => {
                 if !self.args.quiet {
-                    println!("JSON Error: {}", je)
+                    println!("JSON Error: {je}")
                 }
             }
         };
