@@ -102,6 +102,10 @@ pub struct Args {
     /// How many lines after matching line should be reported.
     #[arg(long, short = 'A', default_value_t = 0)]
     after: u32,
+
+    /// Milliseconds between progress updates
+    #[arg(long, default_value_t = 50)]
+    progress_period: u64,
 }
 
 struct ZipDirAnalyzer<TP> {
@@ -112,6 +116,7 @@ struct ZipDirAnalyzer<TP> {
     file_regex: Regex,
     args: Args,
     progress: ProgressBar,
+    last_message: Mutex<String>,
 }
 
 impl<TP: Send + Sync + 'static> ZipDirAnalyzer<TP>
@@ -140,11 +145,13 @@ where
         let mut complete = 0;
         // wait for all processing to complete
         while scheduled > complete {
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(this.args.progress_period));
             complete = this.ops_complete.load(std::sync::atomic::Ordering::Relaxed);
             scheduled = (this.pool.active_count() + this.pool.queued_count()) as u64 + complete;
             this.progress.set_length(scheduled);
             this.progress.set_position(complete);
+            this.progress
+                .set_message(this.last_message.lock().unwrap().clone());
         }
         this.progress
             .println(format!("Complete {complete} of {scheduled}"));
@@ -154,7 +161,8 @@ where
 
     fn search_file<T: Read>(&self, path: &str, data: T) -> Result<()> {
         if self.file_regex.is_match(path) {
-            self.progress.set_message(format!("processing: {path}"));
+            //self.progress.set_message(format!("processing: {path}"));
+            *(self.last_message.lock().unwrap()) = format!("processing: {path}");
             self.process_file(path, data)?;
         } else if self.args.verbose {
             self.progress.println(format!("INFO: skipping {path}"));
@@ -208,7 +216,8 @@ where
             processor,
             file_regex: Regex::new(&args.file_pat)?,
             args,
-            progress: ProgressBar::new(100),
+            progress: ProgressBar::new(1),
+            last_message: Default::default(),
         })
     }
 
@@ -243,7 +252,9 @@ where
                 let mut file = fs::File::open(path)?;
                 this.walk_zip(path_str, &mut file)
             } else if path.is_file() {
-                this.progress.set_message(format!("processing: {path_str}"));
+                //this.progress.set_message(format!("processing: {path_str}"));
+                *(self.last_message.lock().unwrap()) = format!("processing: {path_str}");
+
                 this.process_file(path_str, &File::open(path)?)?;
                 Ok(())
             } else {
