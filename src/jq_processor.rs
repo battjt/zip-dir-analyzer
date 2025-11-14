@@ -1,4 +1,4 @@
-use crate::{TextProcessor, ZipDirAnalyzer};
+use crate::{Args, TextProcessor, ZipDirAnalyzer};
 use anyhow::Result;
 use jaq_core::{
     load::{Arena, File, Loader},
@@ -44,8 +44,18 @@ impl JqProcessor {
     }
 }
 
+struct CleanUtf8<R: Read> {
+    read: R,
+}
+
+impl<R: Read> Read for CleanUtf8<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read.read(buf)
+    }
+}
+
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
+    fn process_file<T: Read>(&self, _args: &Args, path: &str, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {
@@ -57,7 +67,11 @@ impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
                 for result in results {
                     match result {
                         Result::Ok(json_val) => {
-                            if self.report(path, &mut core::iter::once(json_val.to_string()))? {
+                            if self.report(
+                                path,
+                                "capture not implemented for jq",
+                                &mut core::iter::once(json_val.to_string()),
+                            )? {
                                 return Ok(true);
                             }
                         }

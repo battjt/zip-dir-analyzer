@@ -29,20 +29,22 @@ fn main() -> Result<()> {
 }
 
 trait TextProcessor: Send {
-    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
+    fn process_file<T: Read>(&self, args: &Args, path: &str, data: T) -> Result<bool>;
 }
 
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum Output {
     #[default]
-    /// File name followed by the pattern match.
+    /// File name followed by the line matched.
     All,
     /// File name. May be the name of a zip.
     File,
     /// File name, including zip file entries.
     Entry,
-    /// The pattern match result.
-    Pattern,
+    /// The line match result.
+    Line,
+    /// The pattern capture sequence
+    Capture,
 }
 
 /// Search directory for files matching the file_pat that include the pattern. The contents of zip files are also searched.
@@ -104,8 +106,16 @@ pub struct Args {
     after: u32,
 
     /// Milliseconds between progress updates
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 1000)]
     progress_period: u64,
+
+    /// delimiter used when reporting capture sequences
+    #[arg(long, default_value = ",")]
+    capture_delimiter: String,
+
+    /// Which capture groups to report capture sequences. When not specified, all capture groups are reported.
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
+    capture_groups: Vec<usize>,
 }
 
 struct ZipDirAnalyzer<TP> {
@@ -126,7 +136,7 @@ where
     /// Main entry point.
     pub fn run(self) -> Result<()> {
         self.progress.set_style(ProgressStyle::with_template(
-            "{bar} {pos}/{len} {wide_msg}",
+            "{bar} {human_pos}/{human_len} Duration:{elapsed} ETA:{eta} Rate:{per_sec} {wide_msg}",
         )?);
 
         let this = Arc::new(self);
@@ -153,8 +163,8 @@ where
             this.progress
                 .set_message(this.last_message.lock().unwrap().clone());
         }
-        this.progress
-            .println(format!("Complete {complete} of {scheduled}"));
+        // this.progress
+        //     .println(format!("Complete {complete} of {scheduled}"));
 
         Ok(())
     }
@@ -163,7 +173,7 @@ where
         if self.file_regex.is_match(path) {
             //self.progress.set_message(format!("processing: {path}"));
             *(self.last_message.lock().unwrap()) = format!("processing: {path}");
-            self.process_file(path, data)?;
+            self.process_file(&self.args, path, data)?;
         } else if self.args.verbose {
             self.progress.println(format!("INFO: skipping {path}"));
         }
@@ -171,7 +181,12 @@ where
     }
 
     /// all reporting
-    fn report(&self, file: &str, lines: &mut dyn Iterator<Item = String>) -> Result<bool> {
+    fn report(
+        &self,
+        file: &str,
+        capture: &str,
+        lines: &mut dyn Iterator<Item = String>,
+    ) -> Result<bool> {
         let _io = self.stdout_lock.lock();
         match self.args.output {
             Output::File => {
@@ -194,7 +209,7 @@ where
                 println!("{s}");
                 Ok(false)
             }
-            Output::Pattern => {
+            Output::Line => {
                 let line_delimiter = &self.args.line_delimiter;
                 let s = lines
                     .take(1 + self.args.after as usize)
@@ -202,6 +217,10 @@ where
                     .collect::<Vec<String>>()
                     .join(line_delimiter);
                 println!("{s}");
+                Ok(false)
+            }
+            Output::Capture => {
+                println!("{capture}");
                 Ok(false)
             }
         }
@@ -235,8 +254,10 @@ where
         let path = path.to_path_buf();
         let c = self.clone();
         self.pool.execute(move || {
-            c.walk_path(&path)
-                .unwrap_or_else(|_| panic!("Failed to walk path {path:?}"));
+            c.walk_path(&path).unwrap_or_else(|rst| {
+                c.progress
+                    .println(format!("Failed to walk path {path:?}: {rst}"))
+            });
         });
     }
 
@@ -257,7 +278,7 @@ where
                 //this.progress.set_message(format!("processing: {path_str}"));
                 *(self.last_message.lock().unwrap()) = format!("processing: {path_str}");
 
-                this.process_file(path_str, &File::open(path)?)?;
+                this.process_file(&self.args, path_str, &File::open(path)?)?;
                 Ok(())
             } else {
                 // skipping links and devices and such
@@ -269,12 +290,14 @@ where
             }
         };
         // log any failure
-        if result.is_err() && !self.args.quiet {
-            self.progress.println(format!(
-                "WARN: {} skipped due to {}",
-                path.to_str().unwrap(),
-                result.unwrap_err()
-            ));
+        if !self.args.quiet {
+            if let Result::Err(result) = result {
+                self.progress.println(format!(
+                    "WARN: {} skipped due to {}",
+                    path.to_str().unwrap(),
+                    result
+                ));
+            }
         }
         Ok(())
     }
