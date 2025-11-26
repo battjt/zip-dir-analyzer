@@ -1,4 +1,4 @@
-use crate::{shared_iterator::SharedIterator, Args, Output, TextProcessor, ZipDirAnalyzer};
+use crate::{shared_iterator::SharedIterator, Output, TextProcessor, ZipDirAnalyzer};
 use anyhow::{Ok, Result};
 use regex::Regex;
 use std::io::{BufRead, BufReader, Read};
@@ -17,7 +17,7 @@ impl RegexProcessor {
 }
 impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
     /// base file searching routine
-    fn process_file<T: Read>(&self, args: &Args, path: &str, data: T) -> Result<bool> {
+    fn process_file<T: Read>(&self,  path: &str, data: T) -> Result<bool> {
         let mut consecutive_error_count = 0;
         let mut lines = BufReader::new(data).lines();
         let lines = SharedIterator::new(&mut lines);
@@ -43,7 +43,7 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                 }
                 Result::Ok(line) => {
                     // only process capture groups if needed
-                    if let Output::Capture = &args.output {
+                    if let Output::Capture = &self.args.output {
                         if let Some(caps) = self.processor.regex.captures(&line) {
                             // line matched, so now report
                             let more_lines = &mut lines.clone().map(|r| r.unwrap());
@@ -55,7 +55,7 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                                 .map(|c| c.as_str().to_string())
                                 .collect::<Vec<String>>();
 
-                            let capture_groups = &args.capture_groups;
+                            let capture_groups = &self.args.capture_groups;
                             if !capture_groups.is_empty() {
                                 caps = capture_groups
                                     .iter()
@@ -63,7 +63,7 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                                     .collect();
                             }
 
-                            let capture_delimiter = &args.capture_delimiter;
+                            let capture_delimiter = &self.args.capture_delimiter;
                             let regex = caps.join(capture_delimiter);
                             if self.report(path, regex.as_str(), &mut all_lines)? {
                                 // only needed to match once, so exit early

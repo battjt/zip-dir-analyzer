@@ -1,4 +1,4 @@
-use crate::{Args, TextProcessor, ZipDirAnalyzer};
+use crate::{TextProcessor, ZipDirAnalyzer};
 use anyhow::Result;
 use jaq_core::{
     load::{Arena, File, Loader},
@@ -55,7 +55,7 @@ impl<R: Read> Read for CleanUtf8<R> {
 }
 
 impl TextProcessor for ZipDirAnalyzer<JqProcessor> {
-    fn process_file<T: Read>(&self, _args: &Args, path: &str, data: T) -> Result<bool> {
+    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool> {
         let value: Result<Value, _> = serde_json::from_reader(data);
         match value {
             Result::Ok(value) => {

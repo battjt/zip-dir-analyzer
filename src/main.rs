@@ -4,7 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use std::{
     fs::{self, File},
-    io::{self, Read},
+    io::{self, stdin, Read},
     path::Path,
     sync::{atomic::AtomicU64, Arc, Mutex},
     thread,
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
 }
 
 trait TextProcessor: Send {
-    fn process_file<T: Read>(&self, args: &Args, path: &str, data: T) -> Result<bool>;
+    fn process_file<T: Read>(&self, path: &str, data: T) -> Result<bool>;
 }
 
 #[derive(Debug, Default, Clone, ValueEnum)]
@@ -57,7 +57,7 @@ pub struct Args {
     #[arg(value_enum)]
     output: Output,
 
-    /// Directory to search. Use '-' to indicate that the list of directories will be on stdin.
+    /// Directory to search. Use ':list:' to indicate that the list of directories will be on stdin or ':stdin:' to simply use stdin.
     #[arg()]
     directory: String,
 
@@ -142,10 +142,12 @@ where
         let this = Arc::new(self);
         let c = this.clone();
         this.pool.execute(move || {
-            if c.args.directory == "-" {
+            if c.args.directory == ":list:" {
                 for line in io::stdin().lines() {
                     c.schedule_walk_path(Path::new(line.unwrap().as_str()));
                 }
+            } else if c.args.directory == ":stdin:" {
+                c.process_file(":stdin:", stdin());
             } else {
                 c.schedule_walk_path(Path::new(c.args.directory.as_str()));
             }
@@ -173,7 +175,7 @@ where
         if self.file_regex.is_match(path) {
             //self.progress.set_message(format!("processing: {path}"));
             *(self.last_message.lock().unwrap()) = format!("processing: {path}");
-            self.process_file(&self.args, path, data)?;
+            self.process_file(path, data)?;
         } else if self.args.verbose {
             self.progress.println(format!("INFO: skipping {path}"));
         }
@@ -278,7 +280,7 @@ where
                 //this.progress.set_message(format!("processing: {path_str}"));
                 *(self.last_message.lock().unwrap()) = format!("processing: {path_str}");
 
-                this.process_file(&self.args, path_str, &File::open(path)?)?;
+                this.process_file(path_str, &File::open(path)?)?;
                 Ok(())
             } else {
                 // skipping links and devices and such
