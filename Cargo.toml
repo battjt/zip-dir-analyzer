@@ -3,6 +3,14 @@ name = "zip-dir-analyzer"
 version = "3.0.1"
 edition = "2021"
 
+license = "MIT"
+description = "Tool to analyze large directories of zip files."
+homepage = "https://github.com/battjt/zip-dir-analyzer"
+repository = "https://github.com/battjt/zip-dir-analyzer"
+readme = "README.md"
+keywords = ["zip","search","pattern","grep"]
+
+
 [dependencies]
 zip = "6.0.0"
 regex = "1.11.1"
