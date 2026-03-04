@@ -77,6 +77,10 @@ pub struct Args {
     #[arg(long, short = 'q')]
     quiet: bool,
 
+    /// Only report the first regex match in each file.
+    #[arg(long, short = 'f')]
+    first: bool,
+
     /// Delimiter between file name and matching line.
     #[arg(long, short = 'd', default_value = ": ")]
     delimiter: String,

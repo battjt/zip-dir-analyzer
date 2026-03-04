@@ -65,7 +65,7 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
 
                             let capture_delimiter = &self.args.capture_delimiter;
                             let regex = caps.join(capture_delimiter);
-                            if self.report(path, regex.as_str(), &mut all_lines)? {
+                            if self.report(path, regex.as_str(), &mut all_lines)? || self.args.first {
                                 // only needed to match once, so exit early
                                 return Ok(true);
                             }
@@ -75,7 +75,7 @@ impl TextProcessor for ZipDirAnalyzer<RegexProcessor> {
                         let more_lines = &mut lines.clone().map(|r| r.unwrap());
                         let this_line = core::iter::once(line);
                         let mut all_lines = this_line.chain(more_lines);
-                        if self.report(path, "", &mut all_lines)? {
+                        if self.report(path, "", &mut all_lines)? || self.args.first {
                             // only needed to match once, so exit early
                             return Ok(true);
                         }
